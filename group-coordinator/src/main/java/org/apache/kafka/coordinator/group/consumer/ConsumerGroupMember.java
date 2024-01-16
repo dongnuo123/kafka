@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.coordinator.group.consumer;
 
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.ConsumerGroupDescribeResponseData;
 import org.apache.kafka.coordinator.group.generated.ConsumerGroupCurrentMemberAssignmentValue;
@@ -32,6 +33,9 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.stream.Collectors;
+
+import static org.apache.kafka.common.protocol.Errors.COORDINATOR_NOT_AVAILABLE;
+import static org.apache.kafka.common.protocol.Errors.UNKNOWN_TOPIC_ID;
 
 /**
  * ConsumerGroupMember contains all the information related to a member
@@ -578,6 +582,27 @@ public class ConsumerGroupMember {
                 .setTopicId(item.getKey())
                 .setPartitions(new ArrayList<>(item.getValue()))
         ).collect(Collectors.toList());
+    }
+
+    private static String lookupTopicNameById(
+        Uuid topicId,
+        Map<String, TopicMetadata> subscriptionMetadata
+    ) {
+        for (TopicMetadata topicMetadata : subscriptionMetadata.values()) {
+            if (topicId.equals(topicMetadata.id())) {
+                return topicMetadata.name();
+            }
+        }
+        throw UNKNOWN_TOPIC_ID.exception();
+    }
+
+    public List<TopicPartition> topicPartitionList(Map<String, TopicMetadata> subscriptionMetadata) {
+        return assignedPartitions().entrySet().stream().flatMap(item -> {
+            String topicName = lookupTopicNameById(item.getKey(), subscriptionMetadata);
+            return item.getValue().stream().map(
+                partition -> new TopicPartition(topicName, partition)
+            );
+        }).collect(Collectors.toList());
     }
 
     @Override

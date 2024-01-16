@@ -130,6 +130,10 @@ public interface ConsumerPartitionAssignor {
             this(topics, null, Collections.emptyList(), DEFAULT_GENERATION, Optional.empty());
         }
 
+        public Subscription(List<String> topics, List<TopicPartition> ownedPartitions) {
+            this(topics, null, ownedPartitions, DEFAULT_GENERATION, Optional.empty());
+        }
+
         public List<String> topics() {
             return topics;
         }

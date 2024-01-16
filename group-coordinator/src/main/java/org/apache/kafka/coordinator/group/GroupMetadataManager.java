@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.coordinator.group;
 
+import org.apache.kafka.clients.consumer.internals.ConsumerProtocol;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ApiException;
@@ -88,6 +89,7 @@ import org.apache.kafka.timeline.TimelineHashMap;
 import org.apache.kafka.timeline.TimelineHashSet;
 import org.slf4j.Logger;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -867,6 +869,28 @@ public class GroupMetadataManager {
                     + member.memberEpoch() + "). The member must abandon all its partitions and rejoin.");
             }
         }
+    }
+
+    /**
+     * Validates the generation id provided in the JoinGroup request. No exceptions will be thrown if no generation id is provided.
+     *
+     * @param member    The consumer group member.
+     * @param protocols The embedded protocols provided in the JoinGroup request.
+     */
+    private void throwIfGenerationIdIsInvalid(
+        ConsumerGroupMember member,
+        List<JoinGroupRequestProtocol> protocols
+    ) {
+        protocols.forEach(protocol -> {
+            final ByteBuffer buffer = ByteBuffer.wrap(protocol.metadata());
+            ConsumerProtocol.deserializeVersion(buffer);
+            final Optional<Integer> generationId = ConsumerProtocol.deserializeSubscription(buffer, (short) 0).generationId();
+            if (generationId.isPresent() && generationId.get() != member.memberEpoch()) {
+                throw new FencedMemberEpochException("The non-upgrade consumer group member has a different member "
+                    + "epoch (" + generationId.get() + ") from the one known by the group coordinator ("
+                    + member.memberEpoch() + "). The member must abandon all its partitions and rejoin.");
+            }
+        });
     }
 
     /**
@@ -3461,6 +3485,67 @@ public class GroupMetadataManager {
         if (group != null && group.isEmpty()) {
             deleteGroup(groupId, records);
         }
+    }
+
+    public CoordinatorResult<Void, Record> upgradeGroupJoin(
+        RequestContext context,
+        JoinGroupRequestData request,
+        CompletableFuture<JoinGroupResponseData> responseFuture
+    ) throws ApiException {
+        final List<Record> records = new ArrayList<>();
+
+        final String groupId = request.groupId();
+        String memberId = request.memberId();
+        final String instanceId = request.groupInstanceId();
+
+        // Get the consumer group.
+        final ConsumerGroup group = getOrMaybeCreateConsumerGroup(groupId, false);
+        throwIfConsumerGroupIsFull(group, memberId);
+
+        // Get or create the member.
+        if (memberId.equals(UNKNOWN_MEMBER_ID)) memberId = Uuid.randomUuid().toString();
+        ConsumerGroupMember member;
+        ConsumerGroupMember.Builder updatedMemberBuilder;
+        boolean staticMemberReplaced = false;
+        if (instanceId == null) {
+            member = group.getOrMaybeCreateMember(memberId, true);
+
+            // The generation id must match the current member epoch.
+            // TODO: do newly created members need member epoch matching?
+            //  what if generation id is not provided? how to match multiple generation ids provided?
+            //  only match protocols whose name is "consumer"
+            throwIfGenerationIdIsInvalid(member, request.protocols().findAll(ConsumerProtocol.PROTOCOL_TYPE));
+            log.info("[GroupId {}] Member {} joins the upgrading consumer group.", groupId, memberId);
+            updatedMemberBuilder = new ConsumerGroupMember.Builder(member);
+        } else {
+            member = group.staticMember(instanceId);
+            if (member == null) {
+                // New static member.
+                member = group.getOrMaybeCreateMember(memberId, true);
+                updatedMemberBuilder = new ConsumerGroupMember.Builder(member);
+                log.info("[GroupId {}] Static member {} with instance id {} joins the upgrading consumer group.", groupId, memberId, instanceId);
+            } else {
+                // Static member rejoins with a different member id so it should replace
+                // the previous instance iff the previous member had sent a leave group.
+                throwIfInstanceIdIsUnreleased(member, groupId, memberId, instanceId);
+                // Replace the current member.
+                staticMemberReplaced = true;
+                updatedMemberBuilder = new ConsumerGroupMember.Builder(memberId)
+                    .setAssignedPartitions(member.assignedPartitions());
+                removeMemberAndCancelTimers(records, group.groupId(), member.memberId());
+                log.info("[GroupId {}] Static member {} with instance id {} re-joins the upgrading consumer group.", groupId, memberId, instanceId);
+            }
+        }
+
+        // Prepare the response.
+        JoinGroupResponseData response = new JoinGroupResponseData()
+            .setMemberId(member.memberId())
+            .setMembers(group.currentConsumerGroupMembers())
+            .setGenerationId(member.memberEpoch())
+            .setProtocolType(ConsumerProtocol.PROTOCOL_TYPE);
+//            .setProtocolName() // TODO: protocolNames?
+
+        return new CoordinatorResult<>(records, new CompletableFuture<>());
     }
 
     /**

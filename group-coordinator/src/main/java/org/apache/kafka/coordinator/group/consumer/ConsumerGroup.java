@@ -16,12 +16,14 @@
  */
 package org.apache.kafka.coordinator.group.consumer;
 
+import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
 import org.apache.kafka.clients.consumer.internals.ConsumerProtocol;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.StaleMemberEpochException;
 import org.apache.kafka.common.errors.UnknownMemberIdException;
 import org.apache.kafka.common.message.ConsumerGroupDescribeResponseData;
+import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.message.ListGroupsResponseData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.coordinator.group.Group;
@@ -38,6 +40,7 @@ import org.apache.kafka.timeline.TimelineHashMap;
 import org.apache.kafka.timeline.TimelineInteger;
 import org.apache.kafka.timeline.TimelineObject;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,7 +49,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
+import static org.apache.kafka.coordinator.group.classic.ClassicGroupState.DEAD;
+import static org.apache.kafka.coordinator.group.classic.ClassicGroupState.PREPARING_REBALANCE;
 import static org.apache.kafka.coordinator.group.consumer.ConsumerGroup.ConsumerGroupState.ASSIGNING;
 import static org.apache.kafka.coordinator.group.consumer.ConsumerGroup.ConsumerGroupState.EMPTY;
 import static org.apache.kafka.coordinator.group.consumer.ConsumerGroup.ConsumerGroupState.RECONCILING;
@@ -966,5 +972,28 @@ public class ConsumerGroup implements Group {
             )
         );
         return describedGroup;
+    }
+
+    /**
+     * Get all members formatted as a join response from an upgrading group.
+     *
+     * @return the members.
+     */
+    public List<JoinGroupResponseData.JoinGroupResponseMember> currentConsumerGroupMembers() {
+        if (state() == ConsumerGroupState.DEAD || state() == ASSIGNING) {
+            throw new IllegalStateException("Cannot obtain updating consumer group member metadata for group " +
+                groupId + " in state " + state);
+        }
+
+        return members.values().stream().map(member ->
+                new JoinGroupResponseData.JoinGroupResponseMember()
+                    .setMemberId(member.memberId())
+                    .setGroupInstanceId(member.instanceId())
+//                    .setMetadata(member.metadata(protocolName.orElse(null))) // TODO: protocol name?
+                    .setMetadata(ConsumerProtocol.serializeSubscription(
+                        new ConsumerPartitionAssignor.Subscription(new ArrayList<>(subscribedTopicNames()), member.topicPartitionList(subscriptionMetadata()))
+                    ).array())
+            )
+            .collect(Collectors.toList());
     }
 }
