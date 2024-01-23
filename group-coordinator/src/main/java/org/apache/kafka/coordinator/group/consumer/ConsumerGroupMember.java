@@ -16,12 +16,20 @@
  */
 package org.apache.kafka.coordinator.group.consumer;
 
+import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
+import org.apache.kafka.clients.consumer.internals.ConsumerProtocol;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.FencedMemberEpochException;
 import org.apache.kafka.common.message.ConsumerGroupDescribeResponseData;
+import org.apache.kafka.common.message.JoinGroupRequestData;
+import org.apache.kafka.common.message.JoinGroupResponseData;
+import org.apache.kafka.coordinator.group.assignor.RangeAssignor;
+import org.apache.kafka.coordinator.group.assignor.UniformAssignor;
 import org.apache.kafka.coordinator.group.generated.ConsumerGroupCurrentMemberAssignmentValue;
 import org.apache.kafka.coordinator.group.generated.ConsumerGroupMemberMetadataValue;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -32,6 +40,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import static org.apache.kafka.common.protocol.Errors.COORDINATOR_NOT_AVAILABLE;
@@ -67,6 +76,8 @@ public class ConsumerGroupMember {
         private Map<Uuid, Set<Integer>> assignedPartitions = Collections.emptyMap();
         private Map<Uuid, Set<Integer>> partitionsPendingRevocation = Collections.emptyMap();
         private Map<Uuid, Set<Integer>> partitionsPendingAssignment = Collections.emptyMap();
+        private boolean isNonUpgrade = false;
+        private CompletableFuture<JoinGroupResponseData> awaitingJoinFuture;
 
         public Builder(String memberId) {
             this.memberId = Objects.requireNonNull(memberId);
@@ -91,6 +102,8 @@ public class ConsumerGroupMember {
             this.assignedPartitions = member.assignedPartitions;
             this.partitionsPendingRevocation = member.partitionsPendingRevocation;
             this.partitionsPendingAssignment = member.partitionsPendingAssignment;
+            this.isNonUpgrade = member.isNonUpgrade;
+            this.awaitingJoinFuture = member.awaitingJoinFuture;
         }
 
         public Builder setMemberEpoch(int memberEpoch) {
@@ -205,6 +218,16 @@ public class ConsumerGroupMember {
             return this;
         }
 
+        public Builder setNonUpgrade(boolean isNonUpgrade){
+            this.isNonUpgrade = isNonUpgrade;
+            return this;
+        }
+
+        public Builder setAwaitingJoinFuture(CompletableFuture<JoinGroupResponseData> awaitingJoinFuture) {
+            this.awaitingJoinFuture = awaitingJoinFuture;
+            return this;
+        }
+
         public Builder updateWith(ConsumerGroupMemberMetadataValue record) {
             setInstanceId(record.instanceId());
             setRackId(record.rackId());
@@ -228,6 +251,36 @@ public class ConsumerGroupMember {
             setPartitionsPendingRevocation(assignmentFromTopicPartitions(record.partitionsPendingRevocation()));
             setPartitionsPendingAssignment(assignmentFromTopicPartitions(record.partitionsPendingAssignment()));
             return this;
+        }
+
+        /**
+         * Update the member's server assignor, rack id and subscribed topics according to the protocols in JoinGroupRequest.
+         * If multiple supported protocols are provided, choose the first appearing one.
+         */
+        public Builder updateWith(
+            ConsumerGroupMember member,
+            JoinGroupRequestData.JoinGroupRequestProtocolCollection protocols
+        ) {
+            for (JoinGroupRequestData.JoinGroupRequestProtocol protocol : protocols) {
+                final ByteBuffer buffer = ByteBuffer.wrap(protocol.metadata());
+                ConsumerProtocol.deserializeVersion(buffer);
+                final ConsumerPartitionAssignor.Subscription subscription = ConsumerProtocol.deserializeSubscription(buffer, (short) 0);
+                final Optional<Integer> generationId = subscription.generationId();
+
+                // If the generation id is provided, it must match the member epoch.
+                if (!generationId.isPresent() || generationId.get() == member.memberEpoch()) {
+                    // TODO: need a list of all available server assignors
+                    if (UniformAssignor.UNIFORM_ASSIGNOR_NAME.equals(protocol.name())
+                        || RangeAssignor.RANGE_ASSIGNOR_NAME.equals(protocol.name())) {
+                        maybeUpdateServerAssignorName(Optional.ofNullable(protocol.name()));
+                        maybeUpdateRackId(subscription.rackId());
+                        maybeUpdateSubscribedTopicNames(Optional.ofNullable(subscription.topics()));
+                        return this;
+                    }
+                }
+            }
+            throw new FencedMemberEpochException("The JoinGroup request doesn't have a matched generation id" +
+                "with the epoch of the member known by the group coordinator (" + member.memberEpoch() + ").");
         }
 
         private Map<Uuid, Set<Integer>> assignmentFromTopicPartitions(
@@ -265,7 +318,9 @@ public class ConsumerGroupMember {
                 state,
                 assignedPartitions,
                 partitionsPendingRevocation,
-                partitionsPendingAssignment
+                partitionsPendingAssignment,
+                isNonUpgrade,
+                awaitingJoinFuture
             );
         }
     }
@@ -380,6 +435,17 @@ public class ConsumerGroupMember {
      */
     private final Map<Uuid, Set<Integer>> partitionsPendingAssignment;
 
+    /**
+     * The boolean indicating whether the member is a non-upgrade
+     * member in an upgrading group.
+     */
+    private final boolean isNonUpgrade;
+
+    /**
+     * The future that is invoked once this member joins the group.
+     */
+    private CompletableFuture<JoinGroupResponseData> awaitingJoinFuture = null;
+
     private ConsumerGroupMember(
         String memberId,
         int memberEpoch,
@@ -397,7 +463,9 @@ public class ConsumerGroupMember {
         MemberState state,
         Map<Uuid, Set<Integer>> assignedPartitions,
         Map<Uuid, Set<Integer>> partitionsPendingRevocation,
-        Map<Uuid, Set<Integer>> partitionsPendingAssignment
+        Map<Uuid, Set<Integer>> partitionsPendingAssignment,
+        boolean isNonUpgrade,
+        CompletableFuture<JoinGroupResponseData> awaitingJoinFuture
     ) {
         this.memberId = memberId;
         this.memberEpoch = memberEpoch;
@@ -416,6 +484,8 @@ public class ConsumerGroupMember {
         this.assignedPartitions = assignedPartitions;
         this.partitionsPendingRevocation = partitionsPendingRevocation;
         this.partitionsPendingAssignment = partitionsPendingAssignment;
+        this.isNonUpgrade = isNonUpgrade;
+        this.awaitingJoinFuture = awaitingJoinFuture;
     }
 
     /**
@@ -538,6 +608,20 @@ public class ConsumerGroupMember {
     }
 
     /**
+     * @return The boolean indicating whether the member is non-upgrade.
+     */
+    public boolean isNonUpgrade() {
+        return isNonUpgrade;
+    }
+
+    /**
+     * @return The boolean indicating whether the member is awaiting join.
+     */
+    public boolean isAwaitingJoin() {
+        return awaitingJoinFuture != null;
+    }
+
+    /**
      * @return A string representation of the current assignment state.
      */
     public String currentAssignmentSummary() {
@@ -625,7 +709,9 @@ public class ConsumerGroupMember {
             && Objects.equals(clientAssignors, that.clientAssignors)
             && Objects.equals(assignedPartitions, that.assignedPartitions)
             && Objects.equals(partitionsPendingRevocation, that.partitionsPendingRevocation)
-            && Objects.equals(partitionsPendingAssignment, that.partitionsPendingAssignment);
+            && Objects.equals(partitionsPendingAssignment, that.partitionsPendingAssignment)
+            && isNonUpgrade == that.isNonUpgrade
+            && Objects.equals(awaitingJoinFuture, that.awaitingJoinFuture);
     }
 
     @Override
@@ -646,6 +732,8 @@ public class ConsumerGroupMember {
         result = 31 * result + Objects.hashCode(assignedPartitions);
         result = 31 * result + Objects.hashCode(partitionsPendingRevocation);
         result = 31 * result + Objects.hashCode(partitionsPendingAssignment);
+        result = 31 * result + Objects.hashCode(isNonUpgrade);
+        result = 31 * result + Objects.hashCode(awaitingJoinFuture);
         return result;
     }
 
@@ -669,6 +757,8 @@ public class ConsumerGroupMember {
             ", assignedPartitions=" + assignedPartitions +
             ", partitionsPendingRevocation=" + partitionsPendingRevocation +
             ", partitionsPendingAssignment=" + partitionsPendingAssignment +
+            ", isNonUpgrade=" + isNonUpgrade +
+            ", awaitingJoinFuture=" + awaitingJoinFuture +
             ')';
     }
 }
