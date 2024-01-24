@@ -1047,6 +1047,7 @@ public class GroupMetadataManager {
             .maybeUpdateSubscribedTopicNames(Optional.ofNullable(subscribedTopicNames))
             .setClientId(clientId)
             .setClientHost(clientHost)
+            .setNonUpgrade(true)
             .build();
 
         boolean bumpGroupEpoch = false;
@@ -3482,7 +3483,7 @@ public class GroupMetadataManager {
         final boolean joinNewMember = memberId.equals(UNKNOWN_MEMBER_ID);
 
         if (sessionTimeoutMs < classicGroupMinSessionTimeoutMs ||
-            sessionTimeoutMs > classicGroupMaxSessionTimeoutMs // TODO: throw or complete response future?
+            sessionTimeoutMs > classicGroupMaxSessionTimeoutMs
         ) {
             responseFuture.complete(new JoinGroupResponseData()
                 .setMemberId(memberId)
@@ -3539,7 +3540,7 @@ public class GroupMetadataManager {
 
         boolean bumpGroupEpoch = false;
         if (!updatedMember.equals(member)) {
-            records.add(newMemberSubscriptionRecord(groupId, updatedMember));
+            records.add(newMemberSubscriptionRecord(groupId, updatedMember)); // TODO: update new attributes
 
             if (!updatedMember.subscribedTopicNames().equals(member.subscribedTopicNames())) {
                 log.info("[GroupId {}] Member {} updated its subscribed topics to: {}.",
@@ -3618,6 +3619,7 @@ public class GroupMetadataManager {
                 records.addAll(assignmentResult.records());
                 targetAssignment = assignmentResult.targetAssignment().get(memberId);
                 targetAssignmentEpoch = groupEpoch;
+
             } catch (PartitionAssignorException ex) {
                 String msg = String.format("Failed to compute a new target assignment for epoch %d: %s",
                     groupEpoch, ex.getMessage());
@@ -3626,27 +3628,20 @@ public class GroupMetadataManager {
             }
         }
 
-        // Prepare the response.
-        JoinGroupResponseData response = new JoinGroupResponseData()
-            .setMemberId(member.memberId())
-            .setMembers(group.currentConsumerGroupMembers())
-            .setGenerationId(member.memberEpoch())
-            .setProtocolType(ConsumerProtocol.PROTOCOL_TYPE);
-//            .setProtocolName() // TODO: protocolNames?
-
-        return new CoordinatorResult<>(records, new CompletableFuture<>());
+        return EMPTY_RESULT;
     }
 
-//    private void upgradingGroupTriggerRebalance(
-//        ConsumerGroup group
-//    ) {
-//        group.transitionTo(PREPARING_REBALANCE);
-//
+    private CoordinatorResult<Void, Record> prepareRebalance(
+        ConsumerGroup group
+    ) {
+        // all non upgrading members in group transition to revoking
+        // add the non upgrading members whose awaiting join future isn't null to pending join members in group
+
 //        log.info("Preparing to rebalance group {} in state {} with old generation {} (reason: {}).",
 //            group.groupId(), group.currentState(), group.generationId(), reason);
-//
+
 //        return maybeCompleteJoinElseSchedule(group);
-//    }
+    }
 
     /**
      * Checks whether the given protocol type or name in the request is inconsistent with the group's.

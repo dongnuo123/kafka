@@ -178,6 +178,11 @@ public class ConsumerGroup implements Group {
      */
     private DeadlineAndEpoch metadataRefreshDeadline = DeadlineAndEpoch.EMPTY;
 
+    /**
+     * The number of non-upgrade members.
+     */
+    private int numNonUpgradeMembers = 0;
+
     public ConsumerGroup(
         SnapshotRegistry snapshotRegistry,
         String groupId,

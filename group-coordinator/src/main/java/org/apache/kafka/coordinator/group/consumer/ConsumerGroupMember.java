@@ -103,7 +103,6 @@ public class ConsumerGroupMember {
             this.partitionsPendingRevocation = member.partitionsPendingRevocation;
             this.partitionsPendingAssignment = member.partitionsPendingAssignment;
             this.isNonUpgrade = member.isNonUpgrade;
-            this.awaitingJoinFuture = member.awaitingJoinFuture;
         }
 
         public Builder setMemberEpoch(int memberEpoch) {
@@ -223,11 +222,6 @@ public class ConsumerGroupMember {
             return this;
         }
 
-        public Builder setAwaitingJoinFuture(CompletableFuture<JoinGroupResponseData> awaitingJoinFuture) {
-            this.awaitingJoinFuture = awaitingJoinFuture;
-            return this;
-        }
-
         public Builder updateWith(ConsumerGroupMemberMetadataValue record) {
             setInstanceId(record.instanceId());
             setRackId(record.rackId());
@@ -279,8 +273,9 @@ public class ConsumerGroupMember {
                     }
                 }
             }
-            throw new FencedMemberEpochException("The JoinGroup request doesn't have a matched generation id" +
-                "with the epoch of the member known by the group coordinator (" + member.memberEpoch() + ").");
+            throw new FencedMemberEpochException("The JoinGroup request doesn't have a matched generation id from a " +
+                "protocol supported by the server assignors with the epoch of the member known by the group coordinator (" +
+                member.memberEpoch() + ").");
         }
 
         private Map<Uuid, Set<Integer>> assignmentFromTopicPartitions(
@@ -441,11 +436,6 @@ public class ConsumerGroupMember {
      */
     private final boolean isNonUpgrade;
 
-    /**
-     * The future that is invoked once this member joins the group.
-     */
-    private CompletableFuture<JoinGroupResponseData> awaitingJoinFuture = null;
-
     private ConsumerGroupMember(
         String memberId,
         int memberEpoch,
@@ -485,7 +475,6 @@ public class ConsumerGroupMember {
         this.partitionsPendingRevocation = partitionsPendingRevocation;
         this.partitionsPendingAssignment = partitionsPendingAssignment;
         this.isNonUpgrade = isNonUpgrade;
-        this.awaitingJoinFuture = awaitingJoinFuture;
     }
 
     /**
@@ -615,13 +604,6 @@ public class ConsumerGroupMember {
     }
 
     /**
-     * @return The boolean indicating whether the member is awaiting join.
-     */
-    public boolean isAwaitingJoin() {
-        return awaitingJoinFuture != null;
-    }
-
-    /**
      * @return A string representation of the current assignment state.
      */
     public String currentAssignmentSummary() {
@@ -710,8 +692,7 @@ public class ConsumerGroupMember {
             && Objects.equals(assignedPartitions, that.assignedPartitions)
             && Objects.equals(partitionsPendingRevocation, that.partitionsPendingRevocation)
             && Objects.equals(partitionsPendingAssignment, that.partitionsPendingAssignment)
-            && isNonUpgrade == that.isNonUpgrade
-            && Objects.equals(awaitingJoinFuture, that.awaitingJoinFuture);
+            && isNonUpgrade == that.isNonUpgrade;
     }
 
     @Override
@@ -733,7 +714,6 @@ public class ConsumerGroupMember {
         result = 31 * result + Objects.hashCode(partitionsPendingRevocation);
         result = 31 * result + Objects.hashCode(partitionsPendingAssignment);
         result = 31 * result + Objects.hashCode(isNonUpgrade);
-        result = 31 * result + Objects.hashCode(awaitingJoinFuture);
         return result;
     }
 
@@ -758,7 +738,6 @@ public class ConsumerGroupMember {
             ", partitionsPendingRevocation=" + partitionsPendingRevocation +
             ", partitionsPendingAssignment=" + partitionsPendingAssignment +
             ", isNonUpgrade=" + isNonUpgrade +
-            ", awaitingJoinFuture=" + awaitingJoinFuture +
             ')';
     }
 }
